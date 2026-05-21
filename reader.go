@@ -1,4 +1,4 @@
-/* 
+/*
 Copyright (c) 2013 Blake Smith <blakesmith0@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -23,124 +23,143 @@ package ar
 
 import (
 	"io"
-	"io/ioutil"
-	"os"
+	"io/fs"
+	"iter"
 	"strconv"
 	"time"
 )
 
-// Provides read access to an ar archive.
-// Call next to skip files
-// 
+// Reader provides sequential read access to an ar archive.
+//
 // Example:
-//	reader := NewReader(f)
-//	var buf bytes.Buffer
-//	for {
-//		_, err := reader.Next()
-//		if err == io.EOF {
-//			break
-//		}
+//
+//	reader, err := ar.NewReader(f)
+//	if err != nil {
+//		return err
+//	}
+//	for hdr, err := range reader.All() {
 //		if err != nil {
-//			t.Errorf(err.Error())
+//			return err
 //		}
+//		var buf bytes.Buffer
 //		io.Copy(&buf, reader)
 //	}
-
 type Reader struct {
-	r io.Reader
-	nb int64
+	r   io.Reader
+	nb  int64
 	pad int64
 }
 
-// Copies read data to r. Strips the global ar header.
-func NewReader(r io.Reader) *Reader {
-	io.CopyN(ioutil.Discard, r, 8) // Discard global header
-
-	return &Reader{r: r}
+// NewReader creates a new Reader reading from r.
+// It consumes and validates the global ar header.
+func NewReader(r io.Reader) (*Reader, error) {
+	var magic [8]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
+		return nil, err
+	}
+	if string(magic[:]) != globalHeader {
+		return nil, &FormatError{"invalid ar magic"}
+	}
+	return &Reader{r: r}, nil
 }
 
-func (rd *Reader) string(b []byte) string {
-	i := len(b)-1
-	for i > 0 && b[i] == 32 {
-		i--
-	}
-
-	return string(b[0:i+1])
+// FormatError is returned when the archive format is invalid.
+type FormatError struct {
+	msg string
 }
 
-func (rd *Reader) numeric(b []byte) int64 {
-	i := len(b)-1
-	for i > 0 && b[i] == 32 {
-		i--
-	}
+func (e *FormatError) Error() string { return "ar: " + e.msg }
 
-	n, _ := strconv.ParseInt(string(b[0:i+1]), 10, 64)
-
+func parseNumeric(b []byte) int64 {
+	s := trimRight(b)
+	n, _ := strconv.ParseInt(s, 10, 64)
 	return n
 }
 
-func (rd *Reader) octal(b []byte) int64 {
-	i := len(b)-1
-	for i > 0 && b[i] == 32 {
-		i--
+// parseOctal parses the BSD ar octal mode field.
+// The writer encodes mode as "100<octal>" (e.g. "100644"), so we strip the "100" prefix.
+func parseOctal(b []byte) fs.FileMode {
+	s := trimRight(b)
+	if len(s) > 3 {
+		s = s[3:]
 	}
-
-	n, _ := strconv.ParseInt(string(b[3:i+1]), 8, 64)
-
-	return n
+	n, _ := strconv.ParseInt(s, 8, 64)
+	return fs.FileMode(n)
 }
 
 func (rd *Reader) skipUnread() error {
 	skip := rd.nb + rd.pad
 	rd.nb, rd.pad = 0, 0
+	if skip == 0 {
+		return nil
+	}
 	if seeker, ok := rd.r.(io.Seeker); ok {
-		_, err := seeker.Seek(skip, os.SEEK_CUR)
+		_, err := seeker.Seek(skip, io.SeekCurrent)
 		return err
 	}
-
-	_, err := io.CopyN(ioutil.Discard, rd.r, skip)
+	_, err := io.CopyN(io.Discard, rd.r, skip)
 	return err
 }
 
 func (rd *Reader) readHeader() (*Header, error) {
-	headerBuf := make([]byte, HEADER_BYTE_SIZE)
+	headerBuf := make([]byte, headerByteSize)
 	if _, err := io.ReadFull(rd.r, headerBuf); err != nil {
 		return nil, err
 	}
 
-	header := new(Header)
 	s := slicer(headerBuf)
-
-	header.Name = rd.string(s.next(16))
-	header.ModTime = time.Unix(rd.numeric(s.next(12)), 0)
-	header.Uid = int(rd.numeric(s.next(6)))
-	header.Gid = int(rd.numeric(s.next(6)))
-	header.Mode = rd.octal(s.next(8))
-	header.Size = rd.numeric(s.next(10))
-
-	rd.nb = int64(header.Size)
-	if header.Size%2 == 1 {
-		rd.pad = 1
-	} else {
-		rd.pad = 0
+	hdr := &Header{
+		Name:    trimRight(s.next(16)),
+		ModTime: time.Unix(parseNumeric(s.next(12)), 0),
+		Uid:     int(parseNumeric(s.next(6))),
+		Gid:     int(parseNumeric(s.next(6))),
+		Mode:    parseOctal(s.next(8)),
+		Size:    parseNumeric(s.next(10)),
 	}
 
-	return header, nil
+	rd.nb = hdr.Size
+	if hdr.Size%2 == 1 {
+		rd.pad = 1
+	}
+
+	return hdr, nil
 }
 
-// Call Next() to skip to the next file in the archive file.
-// Returns a Header which contains the metadata about the 
-// file in the archive.
+// Next advances to the next file entry in the archive.
+// Returns io.EOF when there are no more entries.
 func (rd *Reader) Next() (*Header, error) {
-	err := rd.skipUnread()
-	if err != nil {
+	if err := rd.skipUnread(); err != nil {
 		return nil, err
 	}
-	
 	return rd.readHeader()
 }
 
-// Read data from the current entry in the archive.
+// All returns an iterator over all entries in the archive.
+// The caller must read or discard each entry's data before the next iteration.
+//
+// Example:
+//
+//	for hdr, err := range reader.All() {
+//		if err != nil {
+//			return err
+//		}
+//		fmt.Println(hdr.Name)
+//	}
+func (rd *Reader) All() iter.Seq2[*Header, error] {
+	return func(yield func(*Header, error) bool) {
+		for {
+			hdr, err := rd.Next()
+			if err == io.EOF {
+				return
+			}
+			if !yield(hdr, err) || err != nil {
+				return
+			}
+		}
+	}
+}
+
+// Read reads from the current entry in the archive.
 func (rd *Reader) Read(b []byte) (n int, err error) {
 	if rd.nb == 0 {
 		return 0, io.EOF
@@ -150,6 +169,5 @@ func (rd *Reader) Read(b []byte) (n int, err error) {
 	}
 	n, err = rd.r.Read(b)
 	rd.nb -= int64(n)
-
 	return
 }

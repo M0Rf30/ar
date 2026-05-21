@@ -1,4 +1,4 @@
-/* 
+/*
 Copyright (c) 2013 Blake Smith <blakesmith0@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -23,7 +23,8 @@ package ar
 
 import (
 	"bytes"
-	"io/ioutil"
+	"errors"
+	"io/fs"
 	"os"
 	"testing"
 	"time"
@@ -31,62 +32,60 @@ import (
 
 func TestGlobalHeaderWrite(t *testing.T) {
 	var buf bytes.Buffer
-	writer := NewWriter(&buf)
-	if err := writer.WriteGlobalHeader(); err != nil {
-		t.Errorf(err.Error())
+	w := NewWriter(&buf)
+	if err := w.WriteGlobalHeader(); err != nil {
+		t.Fatalf("WriteGlobalHeader: %v", err)
 	}
 
-	globalHeader := buf.Bytes()
-	expectedHeader := []byte("!<arch>\n")
-	if !bytes.Equal(globalHeader, expectedHeader) {
-		t.Errorf("Global header should be %s but is %s", expectedHeader, globalHeader)
+	want := []byte("!<arch>\n")
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Errorf("global header: got %q, want %q", buf.Bytes(), want)
 	}
 }
 
 func TestSimpleFile(t *testing.T) {
-	hdr := new(Header)
 	body := "Hello world!\n"
-	hdr.ModTime = time.Unix(1361157466, 0)
-	hdr.Name = "hello.txt"
-	hdr.Size = int64(len(body))
-	hdr.Mode = 0644
-	hdr.Uid = 501
-	hdr.Gid = 20
+	hdr := &Header{
+		Name:    "hello.txt",
+		ModTime: time.Unix(1361157466, 0),
+		Size:    int64(len(body)),
+		Mode:    fs.FileMode(0644),
+		Uid:     501,
+		Gid:     20,
+	}
 
 	var buf bytes.Buffer
-	writer := NewWriter(&buf)
-	writer.WriteGlobalHeader()
-	writer.WriteHeader(hdr)
-	_, err := writer.Write([]byte(body))
-	if err != nil {
-		t.Errorf(err.Error())
+	w := NewWriter(&buf)
+	if err := w.WriteGlobalHeader(); err != nil {
+		t.Fatalf("WriteGlobalHeader: %v", err)
+	}
+	if err := w.WriteHeader(hdr); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+	if _, err := w.Write([]byte(body)); err != nil {
+		t.Fatalf("Write: %v", err)
 	}
 
-	f, _ := os.Open("./fixtures/hello.a")
-	defer f.Close()
-
-	b, err := ioutil.ReadAll(f)
+	fixture, err := os.ReadFile("./fixtures/hello.a")
 	if err != nil {
-		t.Errorf(err.Error())
+		t.Fatalf("ReadFile: %v", err)
 	}
 
-	actual := buf.Bytes()
-	if !bytes.Equal(b, actual) {
-		t.Errorf("Expected %s to equal %s", actual, b)
+	if !bytes.Equal(fixture, buf.Bytes()) {
+		t.Errorf("output mismatch:\n got  %q\n want %q", buf.Bytes(), fixture)
 	}
 }
 
 func TestWriteTooLong(t *testing.T) {
-	body := "Hello world!\n"
-
-	hdr := new(Header)
-	hdr.Size = 1
+	hdr := &Header{Size: 1}
 
 	var buf bytes.Buffer
-	writer := NewWriter(&buf)
-	writer.WriteHeader(hdr)
-	_, err := writer.Write([]byte(body))
-	if err != ErrWriteTooLong {
-		t.Errorf("Error should have been: %s", ErrWriteTooLong)
+	w := NewWriter(&buf)
+	if err := w.WriteHeader(hdr); err != nil {
+		t.Fatalf("WriteHeader: %v", err)
+	}
+	_, err := w.Write([]byte("Hello world!\n"))
+	if !errors.Is(err, ErrWriteTooLong) {
+		t.Errorf("expected ErrWriteTooLong, got %v", err)
 	}
 }

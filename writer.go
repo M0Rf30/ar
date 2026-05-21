@@ -1,4 +1,4 @@
-/* 
+/*
 Copyright (c) 2013 Blake Smith <blakesmith0@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -24,61 +24,65 @@ package ar
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"strconv"
 )
 
-var (
-	ErrWriteTooLong    = errors.New("ar: write too long")
-)
+// ErrWriteTooLong is returned when more bytes are written than declared in the Header.
+var ErrWriteTooLong = errors.New("ar: write too long")
 
 // Writer provides sequential writing of an ar archive.
-// An ar archive is sequence of header file pairs
-// Call WriteHeader to begin writing a new file, then call Write to supply the file's data
 //
 // Example:
-// archive := ar.NewWriter(writer)
-// archive.WriteGlobalHeader()
-// header := new(ar.Header)
-// header.Size = 15 // bytes
-// if err := archive.WriteHeader(header); err != nil {
-// 	return err
-// }
-// io.Copy(archive, data)
+//
+//	w := ar.NewWriter(out)
+//	w.WriteGlobalHeader()
+//	hdr := &ar.Header{Name: "hello.txt", Size: 13, Mode: 0644}
+//	w.WriteHeader(hdr)
+//	io.Copy(w, data)
 type Writer struct {
-	w io.Writer
-	nb int64 // number of unwritten bytes for the current file entry
+	w  io.Writer
+	nb int64 // unwritten bytes for the current entry
 }
 
-// Create a new ar writer that writes to w
+// NewWriter creates a new Writer writing to w.
 func NewWriter(w io.Writer) *Writer { return &Writer{w: w} }
 
-func (aw *Writer) numeric(b []byte, x int64) {
-	s := strconv.FormatInt(x, 10)
-	for len(s) < len(b) {
-		s = s + " "
-	}
-	copy(b, []byte(s))
+func formatNumeric(b []byte, x int64) {
+	copy(b, padRight(strconv.FormatInt(x, 10), len(b)))
 }
 
-func (aw *Writer) octal(b []byte, x int64) {
-	s := "100" + strconv.FormatInt(x, 8)
-	for len(s) < len(b) {
-		s = s + " "
-	}
-	copy(b, []byte(s))
+// formatOctal encodes mode in BSD ar format: "100<octal>" padded to len(b).
+func formatOctal(b []byte, x fs.FileMode) {
+	copy(b, padRight("100"+strconv.FormatInt(int64(x), 8), len(b)))
 }
 
-func (aw *Writer) string(b []byte, str string) {
-	s := str
-	for len(s) < len(b) {
-		s = s + " "
-	}
-	copy(b, []byte(s))
+// WriteGlobalHeader writes the ar global header. Must be called once before any entries.
+func (aw *Writer) WriteGlobalHeader() error {
+	_, err := io.WriteString(aw.w, globalHeader)
+	return err
 }
 
-// Writes to the current entry in the ar archive
-// Returns ErrWriteTooLong if more than header.Size
-// bytes are written after a call to WriteHeader
+// WriteHeader writes the file header and prepares the writer to accept the file's data.
+func (aw *Writer) WriteHeader(hdr *Header) error {
+	aw.nb = hdr.Size
+	header := make([]byte, headerByteSize)
+	s := slicer(header)
+
+	copy(s.next(16), padRight(hdr.Name, 16))
+	formatNumeric(s.next(12), hdr.ModTime.Unix())
+	formatNumeric(s.next(6), int64(hdr.Uid))
+	formatNumeric(s.next(6), int64(hdr.Gid))
+	formatOctal(s.next(8), hdr.Mode)
+	formatNumeric(s.next(10), hdr.Size)
+	copy(s.next(2), padRight("`\n", 2))
+
+	_, err := aw.w.Write(header)
+	return err
+}
+
+// Write writes data for the current entry.
+// Returns ErrWriteTooLong if more bytes are written than declared in the Header.
 func (aw *Writer) Write(b []byte) (n int, err error) {
 	if int64(len(b)) > aw.nb {
 		b = b[0:aw.nb]
@@ -89,36 +93,11 @@ func (aw *Writer) Write(b []byte) (n int, err error) {
 	if werr != nil {
 		return n, werr
 	}
-
-	if len(b)%2 == 1 { // data size must be aligned to an even byte
-		n2, _ := aw.w.Write([]byte{'\n'})
-		return n+n2, err
+	// ar entries must be aligned to an even byte boundary
+	if len(b)%2 == 1 {
+		if _, perr := aw.w.Write([]byte{'\n'}); perr != nil && err == nil {
+			err = perr
+		}
 	}
-
 	return
-}
-
-func (aw *Writer) WriteGlobalHeader() error {
-	_, err := aw.w.Write([]byte(GLOBAL_HEADER))
-	return err
-}
-
-// Writes the header to the underlying writer and prepares
-// to receive the file payload
-func (aw *Writer) WriteHeader(hdr *Header) error {
-	aw.nb = int64(hdr.Size)
-	header := make([]byte, HEADER_BYTE_SIZE)
-	s := slicer(header)
-
-	aw.string(s.next(16), hdr.Name)
-	aw.numeric(s.next(12), hdr.ModTime.Unix())
-	aw.numeric(s.next(6), int64(hdr.Uid))
-	aw.numeric(s.next(6), int64(hdr.Gid))
-	aw.octal(s.next(8), hdr.Mode)
-	aw.numeric(s.next(10), hdr.Size)
-	aw.string(s.next(2), "`\n")
-
-	_, err := aw.w.Write(header)
-
-	return err
 }

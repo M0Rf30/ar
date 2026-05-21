@@ -1,4 +1,4 @@
-/* 
+/*
 Copyright (c) 2013 Blake Smith <blakesmith0@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -22,27 +22,48 @@ THE SOFTWARE.
 package ar
 
 import (
+	"io/fs"
+	"strings"
 	"time"
 )
 
 const (
-	HEADER_BYTE_SIZE = 60
-	GLOBAL_HEADER = "!<arch>\n"
+	headerByteSize = 60
+	globalHeader   = "!<arch>\n"
 )
 
+// Header represents the metadata for a single file entry in an ar archive.
 type Header struct {
-	Name string
+	Name    string
 	ModTime time.Time
-	Uid int
-	Gid int
-	Mode int64
-	Size int64
+	Uid     int
+	Gid     int
+	Mode    fs.FileMode
+	Size    int64
 }
 
 type slicer []byte
 
-func (sp *slicer) next(n int) (b []byte) {
+func (sp *slicer) next(n int) []byte {
 	s := *sp
-	b, *sp = s[0:n], s[n:]
-	return
+	b := s[0:n]
+	*sp = s[n:]
+	return b
+}
+
+// trimRight strips trailing ASCII spaces from b and returns the result as a string.
+func trimRight(b []byte) string {
+	i := len(b) - 1
+	for i > 0 && b[i] == ' ' {
+		i--
+	}
+	return string(b[0 : i+1])
+}
+
+// padRight returns s padded with spaces on the right to exactly n bytes.
+func padRight(s string, n int) string {
+	if len(s) < n {
+		s += strings.Repeat(" ", n-len(s))
+	}
+	return s
 }

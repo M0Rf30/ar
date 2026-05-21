@@ -1,4 +1,4 @@
-/* 
+/*
 Copyright (c) 2013 Blake Smith <blakesmith0@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -24,90 +24,92 @@ package ar
 import (
 	"bytes"
 	"io"
+	"io/fs"
 	"os"
 	"testing"
 	"time"
 )
 
-func TestReadHeader(t *testing.T) {
-	f, err := os.Open("./fixtures/hello.a")
-	defer f.Close()
-
+func openFixture(t *testing.T, name string) *os.File {
+	t.Helper()
+	f, err := os.Open("./fixtures/" + name)
 	if err != nil {
-		t.Errorf(err.Error())
+		t.Fatalf("open fixture %s: %v", name, err)
 	}
-	reader := NewReader(f)
+	t.Cleanup(func() {
+		if err := f.Close(); err != nil {
+			t.Errorf("close fixture %s: %v", name, err)
+		}
+	})
+	return f
+}
+
+func newReader(t *testing.T, name string) *Reader {
+	t.Helper()
+	r, err := NewReader(openFixture(t, name))
+	if err != nil {
+		t.Fatalf("NewReader %s: %v", name, err)
+	}
+	return r
+}
+
+func TestReadHeader(t *testing.T) {
+	reader := newReader(t, "hello.a")
 	header, err := reader.Next()
 	if err != nil {
-		t.Errorf(err.Error())
+		t.Fatalf("Next: %v", err)
 	}
 
-	expectedName := "hello.txt"
-	if header.Name != expectedName {
-		t.Errorf("Header name should be %s but is %s", expectedName, header.Name)
+	tests := []struct {
+		field     string
+		got, want any
+	}{
+		{"Name", header.Name, "hello.txt"},
+		{"ModTime", header.ModTime, time.Unix(1361157466, 0)},
+		{"Uid", header.Uid, 501},
+		{"Gid", header.Gid, 20},
+		{"Mode", header.Mode, fs.FileMode(0644)},
 	}
-	expectedModTime := time.Unix(1361157466, 0)
-	if header.ModTime != expectedModTime {
-		t.Errorf("ModTime should be %s but is %s", expectedModTime, header.ModTime)
-	}
-	expectedUid := 501
-	if header.Uid != expectedUid {
-		t.Errorf("Uid should be %d but is %d", expectedUid, header.Uid)
-	}
-	expectedGid := 20
-	if header.Gid != expectedGid {
-		t.Errorf("Gid should be %d but is %d", expectedGid, header.Gid)
-	}
-	expectedMode := int64(0644)
-	if header.Mode != expectedMode {
-		t.Errorf("Mode should be %d but is %d", expectedMode, header.Mode)
+	for _, tt := range tests {
+		if tt.got != tt.want {
+			t.Errorf("%s: got %v, want %v", tt.field, tt.got, tt.want)
+		}
 	}
 }
 
 func TestReadBody(t *testing.T) {
-	f, err := os.Open("./fixtures/hello.a")
-	defer f.Close()
+	reader := newReader(t, "hello.a")
+	if _, err := reader.Next(); err != nil && err != io.EOF {
+		t.Fatalf("Next: %v", err)
+	}
 
-	if err != nil {
-		t.Errorf(err.Error())
-	}
-	reader := NewReader(f)
-	_, err = reader.Next()
-	if err != nil && err != io.EOF {
-		t.Errorf(err.Error())
-	}
 	var buf bytes.Buffer
-	io.Copy(&buf, reader)
+	if _, err := io.Copy(&buf, reader); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
 
-	expected := []byte("Hello world!\n")
-	actual := buf.Bytes()
-	if !bytes.Equal(actual, expected) {
-		t.Errorf("Data value should be %s but is %s", expected, actual)
+	want := []byte("Hello world!\n")
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Errorf("body: got %q, want %q", buf.Bytes(), want)
 	}
 }
 
 func TestReadMulti(t *testing.T) {
-	f, err := os.Open("./fixtures/multi_archive.a")
-	defer f.Close()
+	reader := newReader(t, "multi_archive.a")
 
-	if err != nil {
-		t.Errorf(err.Error())
-	}
-	reader := NewReader(f)
 	var buf bytes.Buffer
-	for {
-		_, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
+	for hdr, err := range reader.All() {
 		if err != nil {
-			t.Errorf(err.Error())
+			t.Fatalf("All: %v", err)
 		}
-		io.Copy(&buf, reader)
+		_ = hdr
+		if _, err := io.Copy(&buf, reader); err != nil {
+			t.Fatalf("Copy: %v", err)
+		}
 	}
-	expected := []byte("Hello world!\nI love lamp.\n")
-	actual := buf.Bytes()
-	if !bytes.Equal(expected, actual) {
-		t.Errorf("Concatted byte buffer should be %s but is %s", expected, actual)
+
+	want := []byte("Hello world!\nI love lamp.\n")
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Errorf("multi body: got %q, want %q", buf.Bytes(), want)
 	}
 }
