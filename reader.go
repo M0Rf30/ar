@@ -55,7 +55,7 @@ type Reader struct {
 func NewReader(r io.Reader) (*Reader, error) {
 	var magic [8]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
-		return nil, err
+		return nil, &FormatError{"truncated global header"}
 	}
 	if string(magic[:]) != globalHeader {
 		return nil, &FormatError{"invalid ar magic"}
@@ -65,10 +65,10 @@ func NewReader(r io.Reader) (*Reader, error) {
 
 // FormatError is returned when the archive format is invalid.
 type FormatError struct {
-	msg string
+	Msg string // human-readable description of the format violation
 }
 
-func (e *FormatError) Error() string { return "ar: " + e.msg }
+func (e *FormatError) Error() string { return "ar: " + e.Msg }
 
 func parseNumeric(b []byte) int64 {
 	s := trimRight(b)

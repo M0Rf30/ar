@@ -41,8 +41,9 @@ var ErrWriteTooLong = errors.New("ar: write too long")
 //	w.WriteHeader(hdr)
 //	io.Copy(w, data)
 type Writer struct {
-	w  io.Writer
-	nb int64 // unwritten bytes for the current entry
+	w   io.Writer
+	nb  int64 // unwritten bytes for the current entry
+	pad bool  // whether a padding byte must be written when nb reaches 0
 }
 
 // NewWriter creates a new Writer writing to w.
@@ -66,6 +67,7 @@ func (aw *Writer) WriteGlobalHeader() error {
 // WriteHeader writes the file header and prepares the writer to accept the file's data.
 func (aw *Writer) WriteHeader(hdr *Header) error {
 	aw.nb = hdr.Size
+	aw.pad = hdr.Size%2 == 1
 	header := make([]byte, headerByteSize)
 	s := slicer(header)
 
@@ -93,8 +95,9 @@ func (aw *Writer) Write(b []byte) (n int, err error) {
 	if werr != nil {
 		return n, werr
 	}
-	// ar entries must be aligned to an even byte boundary
-	if len(b)%2 == 1 {
+	// emit alignment byte once all declared bytes have been written
+	if aw.nb == 0 && aw.pad {
+		aw.pad = false
 		if _, perr := aw.w.Write([]byte{'\n'}); perr != nil && err == nil {
 			err = perr
 		}
