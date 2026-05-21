@@ -1,3 +1,3 @@
-module github.com/blakesmith/ar
+module github.com/m0rf30/ar
 
 go 1.26
